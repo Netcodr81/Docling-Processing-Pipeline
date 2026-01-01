@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Iterable
 from pathlib import Path
 from PIL import Image
 
@@ -65,6 +65,80 @@ def save_image(
 
     image.save(image_path)
     return str(image_path)
+
+def _extract_meta_fields(chunk):
+    """Extract page_numbers, a union bbox, has_ocr and language from chunk.meta.
+
+    Handles exported JSON meta (export_json_dict) and attribute-based meta objects.
+    Returns: (page_numbers: Optional[List[int]], bbox: Optional[dict], has_ocr: bool, language: Optional[str])
+    """
+
+    try:
+        meta_dict = chunk.meta.export_json_dict() if hasattr(getattr(chunk, "meta", None), "export_json_dict") else {}
+    except Exception:
+        meta_dict = {}
+
+    doc_items = meta_dict.get("doc_items", []) or []
+    page_numbers: List[int] = []
+    bboxes: List[dict] = []
+
+    # Parse exported dict-style doc_items
+    for di in doc_items:
+        if isinstance(di, dict):
+            provs = di.get("prov") or di.get("provenance") or []
+            for p in provs:
+                if isinstance(p, dict):
+                    page = p.get("page_no") or p.get("page") or p.get("page_number")
+                    if page is not None:
+                        page_numbers.append(page)
+                    bbox = p.get("bbox")
+                    if isinstance(bbox, dict) and all(k in bbox for k in ("l", "t", "r", "b")):
+                        bboxes.append(bbox)
+
+    # Fallback to attribute-based doc_items (objects)
+    if not doc_items:
+        doc_items_attr = getattr(getattr(chunk, "meta", None), "doc_items", None)
+        if isinstance(doc_items_attr, Iterable):
+            for di in doc_items_attr:
+                provs = getattr(di, "prov", []) or getattr(di, "provenance", []) or []
+                for p in provs:
+                    page = getattr(p, "page_no", None) or getattr(p, "page_number", None) or getattr(p, "page", None)
+                    if page is not None:
+                        page_numbers.append(page)
+                    bbox_attr = getattr(p, "bbox", None)
+                    if isinstance(bbox_attr, dict) and all(k in bbox_attr for k in ("l", "t", "r", "b")):
+                        bboxes.append(bbox_attr)
+                    else:
+                        # some bbox objects expose attributes
+                        if hasattr(bbox_attr, "l") and hasattr(bbox_attr, "t") and hasattr(bbox_attr, "r") and hasattr(bbox_attr, "b"):
+                            try:
+                                bboxes.append({
+                                    "l": getattr(bbox_attr, "l"),
+                                    "t": getattr(bbox_attr, "t"),
+                                    "r": getattr(bbox_attr, "r"),
+                                    "b": getattr(bbox_attr, "b"),
+                                })
+                            except Exception:
+                                pass
+
+    page_numbers = sorted(set(page_numbers)) if page_numbers else None
+
+    # Compute a union bbox if we collected any; otherwise leave None
+    bbox = None
+    if bboxes:
+        try:
+            l = min(b["l"] for b in bboxes)
+            t = min(b["t"] for b in bboxes)
+            r = max(b["r"] for b in bboxes)
+            b = max(b["b"] for b in bboxes)
+            bbox = {"l": l, "t": t, "r": r, "b": b, "coord_origin": bboxes[0].get("coord_origin")}
+        except Exception:
+            bbox = bboxes[0]
+
+    has_ocr = meta_dict.get("has_ocr", getattr(chunk, "has_ocr", False))
+    language = meta_dict.get("language", getattr(chunk, "language", None))
+
+    return page_numbers, bbox, has_ocr, language
 
 def process_document(
     file_path: str,
